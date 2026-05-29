@@ -1,0 +1,821 @@
+/* =============================================================================
+PROJECT      : EMPLOYEE INGESTION PIPELINE
+PLATFORM     : SNOWFLAKE + AWS S3 + SNOWPIPE
+ENV          : PRODUCTION GRADE
+VERSION      : 2.0
+LAST UPDATED : 2026-05-29
+
+ARCHITECTURE
+------------------------------------------------------------------------------
+S3 CSV Files
+    ->
+Snowpipe AUTO_INGEST (TRY_TO_TIMESTAMP_NTZ + validated columns)
+    ->
+RAW TABLE (Immutable / Append Only)
+    ->
+STREAM (Standard CDC Tracking)
+    ->
+STORED PROCEDURE (Exception handler + error logging)
+    ->
+TASK (5-min schedule / stream-guarded)
+    ->
+CURATED TABLE (Soft deletes via IS_ACTIVE)
+
+FIXES FROM v1.0
+------------------------------------------------------------------------------
+1.  Soft delete  : IS_ACTIVE = FALSE instead of hard DELETE
+2.  TRY_TO_TIMESTAMP_NTZ : Resilient DOB parsing with explicit format
+3.  Orphaned UPDATE : Only genuine INSERTs trigger WHEN NOT MATCHED
+4.  Task schedule : Changed from every minute to every 5 minutes
+5.  Error logging  : PIPELINE_ERROR_LOG table + SP exception handler
+6.  Data quality   : NULL EMP_ID + negative SALARY guards in MERGE source
+7.  Role grants    : Full GRANT scaffolding for SYSADMIN / pipeline role
+8.  Comments       : Stream type rationale documented inline
+
+EXPECTED CSV FORMAT
+------------------------------------------------------------------------------
+EMP_ID, NAME, TAX, SALARY, DOB, COUNTRY, OPERATION
+
+OPERATION VALUES
+------------------------------------------------------------------------------
+I = INSERT
+U = UPDATE
+D = DELETE (soft — sets IS_ACTIVE = FALSE)
+============================================================================= */
+
+
+-- =============================================================================
+-- SECTION 1 : ROLES & GRANTS
+-- =============================================================================
+-- Run as ACCOUNTADMIN or SECURITYADMIN
+-- Creates a dedicated pipeline role with least-privilege access
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+-- Create dedicated role for the pipeline
+CREATE ROLE IF NOT EXISTS PIPELINE_ROLE;
+
+-- Grant role to SYSADMIN for manageability
+GRANT ROLE PIPELINE_ROLE TO ROLE SYSADMIN;
+
+-- Warehouse usage
+GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE PIPELINE_ROLE;
+
+-- Database & schema usage
+GRANT USAGE ON DATABASE DEV_DB                  TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.RAW              TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.STAGE            TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.CURATED          TO ROLE PIPELINE_ROLE;
+
+-- Table grants
+GRANT SELECT, INSERT           ON TABLE DEV_DB.RAW.EMP_DATA_RAW          TO ROLE PIPELINE_ROLE;
+GRANT SELECT, INSERT, UPDATE   ON TABLE DEV_DB.CURATED.EMP_DATA          TO ROLE PIPELINE_ROLE;
+GRANT SELECT, INSERT           ON TABLE DEV_DB.STAGE.PIPELINE_ERROR_LOG  TO ROLE PIPELINE_ROLE;
+
+-- Stream grants
+GRANT SELECT ON STREAM DEV_DB.STAGE.EMP_STREAM TO ROLE PIPELINE_ROLE;
+
+-- Stage grants
+GRANT USAGE ON STAGE DEV_DB.STAGE.EMP_EXT_STAGE TO ROLE PIPELINE_ROLE;
+
+-- Pipe & task grants
+GRANT OPERATE, MONITOR ON PIPE DEV_DB.STAGE.EMP_SNOWPIPE    TO ROLE PIPELINE_ROLE;
+GRANT OPERATE, MONITOR ON TASK DEV_DB.STAGE.EMP_MERGE_TASK  TO ROLE PIPELINE_ROLE;
+
+-- Procedure grant
+GRANT USAGE ON PROCEDURE DEV_DB.STAGE.SP_EMP_MERGE() TO ROLE PIPELINE_ROLE;
+
+
+
+-- =============================================================================
+-- SECTION 2 : DATABASE & SCHEMAS
+-- =============================================================================
+
+USE ROLE SYSADMIN;
+
+CREATE DATABASE IF NOT EXISTS DEV_DB;
+
+CREATE SCHEMA IF NOT EXISTS DEV_DB.RAW;
+CREATE SCHEMA IF NOT EXISTS DEV_DB.STAGE;
+CREATE SCHEMA IF NOT EXISTS DEV_DB.CURATED;
+
+
+
+-- =============================================================================
+-- SECTION 3 : WAREHOUSE
+-- =============================================================================
+-- AUTO_RESUME   : Automatically resumes when task fires
+-- AUTO_SUSPEND  : Suspends after 60s of inactivity to control cost
+-- XSMALL        : Appropriate for this pipeline volume; scale up as needed
+-- =============================================================================
+
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH
+WITH
+    WAREHOUSE_SIZE    = 'XSMALL'
+    AUTO_SUSPEND      = 60
+    AUTO_RESUME       = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+
+
+-- =============================================================================
+-- SECTION 4 : RAW TABLE
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Immutable append-only landing zone. Never update or delete from here.
+-- All source data arrives here verbatim before any transformation.
+--
+-- OPERATION VALUES
+-- -----------------------------------------------------------------------------
+-- I = INSERT  |  U = UPDATE  |  D = DELETE
+--
+-- METADATA COLUMNS
+-- -----------------------------------------------------------------------------
+-- FILE_NAME       : Source S3 file path
+-- FILE_ROW_NUMBER : Row position within source file (aids debugging)
+-- LOAD_TIMESTAMP  : UTC timestamp at point of ingestion
+-- PIPE_NAME       : Snowpipe name (useful when multiple pipes feed one table)
+-- =============================================================================
+
+CREATE OR REPLACE TABLE DEV_DB.RAW.EMP_DATA_RAW (
+
+    EMP_ID              VARCHAR,
+    NAME                VARCHAR,
+    TAX                 NUMBER(10,2),
+    SALARY              NUMBER(12,2),
+    DOB                 TIMESTAMP_NTZ,        -- Parsed via TRY_TO_TIMESTAMP_NTZ in pipe
+    COUNTRY             VARCHAR,
+
+    -- CDC operation flag from source
+    OPERATION           VARCHAR,
+
+    -- Ingestion metadata
+    FILE_NAME           VARCHAR,
+    FILE_ROW_NUMBER     NUMBER,
+    LOAD_TIMESTAMP      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PIPE_NAME           VARCHAR
+
+);
+
+
+
+-- =============================================================================
+-- SECTION 5 : ERROR LOG TABLE
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Captures runtime exceptions from the merge stored procedure.
+-- Avoids silent failures that would otherwise only surface in TASK_HISTORY.
+--
+-- COLUMNS
+-- -----------------------------------------------------------------------------
+-- LOG_TIMESTAMP : When the error occurred
+-- PROC_NAME     : Which stored procedure raised it
+-- ERROR_CODE    : Snowflake SQLCODE
+-- ERROR_STATE   : Snowflake SQLSTATE
+-- ERROR_MESSAGE : Full exception message
+-- ROWS_IN_STREAM: Stream row count at time of failure (diagnostic)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS DEV_DB.STAGE.PIPELINE_ERROR_LOG (
+
+    LOG_TIMESTAMP       TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    PROC_NAME           VARCHAR,
+    ERROR_CODE          VARCHAR,
+    ERROR_STATE         VARCHAR,
+    ERROR_MESSAGE       VARCHAR,
+    ROWS_IN_STREAM      NUMBER
+
+);
+
+
+
+-- =============================================================================
+-- SECTION 6 : STORAGE INTEGRATION
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Secure IAM-based connection between Snowflake and AWS S3.
+-- Avoids storing long-lived AWS credentials inside Snowflake.
+--
+-- POST-CREATION STEPS (run once, outside Snowflake)
+-- -----------------------------------------------------------------------------
+-- 1. DESC INTEGRATION DEV_S3_EMP_INT;
+-- 2. Copy STORAGE_AWS_IAM_USER_ARN  and  STORAGE_AWS_EXTERNAL_ID
+-- 3. Paste into the AWS IAM Trust Policy on the target role
+-- =============================================================================
+
+CREATE OR REPLACE STORAGE INTEGRATION DEV_S3_EMP_INT
+    TYPE                      = EXTERNAL_STAGE
+    STORAGE_PROVIDER          = S3
+    ENABLED                   = TRUE
+    STORAGE_AWS_ROLE_ARN      = 'arn:aws:iam::265230572780:role/role-aws-s3-bkt-ex'
+    STORAGE_ALLOWED_LOCATIONS = ('s3://aws-s3-bkt-ex/SnowflakeData/');
+
+
+
+-- =============================================================================
+-- SECTION 7 : VALIDATE STORAGE INTEGRATION
+-- =============================================================================
+
+DESC INTEGRATION DEV_S3_EMP_INT;
+
+
+
+-- =============================================================================
+-- SECTION 8 : AWS CONFIGURATION (OUTSIDE SNOWFLAKE)
+-- =============================================================================
+-- Required for AUTO_INGEST = TRUE
+--
+-- 1. Create an SNS Topic in the same AWS region as the S3 bucket
+-- 2. Add an S3 Event Notification on the bucket -> publish to that SNS Topic
+-- 3. Run:  DESC PIPE DEV_DB.STAGE.EMP_SNOWPIPE;
+--    Copy the notificationChannel ARN from the output
+-- 4. In SNS -> Subscriptions -> Create subscription
+--    Protocol: SQS  |  Endpoint: the notificationChannel ARN
+--
+-- Without this, Snowpipe will NOT auto-trigger on new files
+-- =============================================================================
+
+
+
+-- =============================================================================
+-- SECTION 9 : FILE FORMAT
+-- =============================================================================
+-- SKIP_HEADER                    : Skips the CSV header row
+-- TRIM_SPACE                     : Strips leading/trailing whitespace from fields
+-- FIELD_OPTIONALLY_ENCLOSED_BY   : Handles quoted fields containing commas
+-- NULL_IF                        : Treats 'NULL', 'null', '' as SQL NULL
+-- EMPTY_FIELD_AS_NULL            : Belt-and-braces null handling
+-- ERROR_ON_COLUMN_COUNT_MISMATCH : Rejects malformed files at load time
+-- =============================================================================
+
+CREATE OR REPLACE FILE FORMAT DEV_DB.STAGE.CSV_EMP_FORMAT
+    TYPE                          = CSV
+    FIELD_DELIMITER               = ','
+    SKIP_HEADER                   = 1
+    TRIM_SPACE                    = TRUE
+    FIELD_OPTIONALLY_ENCLOSED_BY  = '"'
+    NULL_IF                       = ('NULL', 'null', '')
+    EMPTY_FIELD_AS_NULL           = TRUE
+    ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE;
+
+
+
+-- =============================================================================
+-- SECTION 10 : EXTERNAL STAGE
+-- =============================================================================
+
+CREATE OR REPLACE STAGE DEV_DB.STAGE.EMP_EXT_STAGE
+    URL               = 's3://aws-s3-bkt-ex/SnowflakeData/'
+    STORAGE_INTEGRATION = DEV_S3_EMP_INT
+    FILE_FORMAT       = DEV_DB.STAGE.CSV_EMP_FORMAT;
+
+
+
+-- =============================================================================
+-- SECTION 11 : VALIDATE STAGE
+-- =============================================================================
+
+LIST @DEV_DB.STAGE.EMP_EXT_STAGE;
+
+
+
+-- =============================================================================
+-- SECTION 12 : SNOWPIPE
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Event-driven ingestion from S3 into RAW table.
+--
+-- KEY CHANGES FROM v1.0
+-- -----------------------------------------------------------------------------
+-- TRY_TO_TIMESTAMP_NTZ  : Returns NULL (not an error) on unparseable DOB values.
+--                         Explicit format 'YYYY-MM-DD' prevents ambiguous parsing.
+-- ON_ERROR = CONTINUE   : Skips bad rows; use VALIDATE_PIPE_LOAD to inspect them.
+--
+-- NOTE ON OPERATION COLUMN
+-- -----------------------------------------------------------------------------
+-- UPPER($7) normalises 'i','u','d' from source to 'I','U','D'.
+-- =============================================================================
+
+CREATE OR REPLACE PIPE DEV_DB.STAGE.EMP_SNOWPIPE
+
+    AUTO_INGEST = TRUE
+
+AS
+
+COPY INTO DEV_DB.RAW.EMP_DATA_RAW
+(
+    EMP_ID,
+    NAME,
+    TAX,
+    SALARY,
+    DOB,
+    COUNTRY,
+    OPERATION,
+    FILE_NAME,
+    FILE_ROW_NUMBER,
+    LOAD_TIMESTAMP,
+    PIPE_NAME
+)
+FROM
+(
+    SELECT
+        $1,                                              -- EMP_ID
+        $2,                                              -- NAME
+        $3,                                              -- TAX
+        $4,                                              -- SALARY
+        TRY_TO_TIMESTAMP_NTZ($5, 'YYYY-MM-DD'),          -- DOB  (NULL on bad format, not an error)
+        $6,                                              -- COUNTRY
+        UPPER($7),                                       -- OPERATION  (normalise case)
+        METADATA$FILENAME,                               -- SOURCE FILE NAME
+        METADATA$FILE_ROW_NUMBER,                        -- ROW POSITION IN FILE
+        CURRENT_TIMESTAMP(),                             -- INGESTION TIMESTAMP
+        'EMP_SNOWPIPE'                                   -- PIPE IDENTIFIER
+    FROM @DEV_DB.STAGE.EMP_EXT_STAGE
+)
+PATTERN   = '.*[.]csv'
+ON_ERROR  = 'CONTINUE';
+
+
+
+-- =============================================================================
+-- SECTION 13 : STREAM
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Tracks new rows appended to the RAW table for downstream CDC processing.
+--
+-- DESIGN DECISION — Standard stream (not APPEND_ONLY)
+-- -----------------------------------------------------------------------------
+-- RAW is append-only in practice, but we deliberately use a standard stream
+-- (default) rather than APPEND_ONLY = TRUE.
+--
+-- Reason: our CDC logic is carried in the OPERATION column we control, not
+-- in Snowflake's METADATA$ACTION / METADATA$ISUPDATE flags. A standard stream
+-- works on any table type and keeps options open if the RAW table ever needs
+-- correction inserts that replace rows. APPEND_ONLY streams only expose inserts
+-- and would silently ignore any such corrections.
+-- =============================================================================
+
+CREATE OR REPLACE STREAM DEV_DB.STAGE.EMP_STREAM
+    ON TABLE DEV_DB.RAW.EMP_DATA_RAW;
+
+
+
+-- =============================================================================
+-- SECTION 14 : CURATED TABLE
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Business-ready, deduplicated employee master record.
+--
+-- SOFT DELETE DESIGN
+-- -----------------------------------------------------------------------------
+-- IS_ACTIVE = FALSE marks deleted employees without destroying audit history.
+-- This aligns with IS_ACTIVE column intent and satisfies audit requirements
+-- in regulated environments.
+--
+-- NOTE
+-- -----------------------------------------------------------------------------
+-- PRIMARY KEY is informational only in standard Snowflake tables.
+-- Enforcement requires Hybrid Tables (not used here).
+-- =============================================================================
+
+CREATE OR REPLACE TABLE DEV_DB.CURATED.EMP_DATA (
+
+    EMP_ID          VARCHAR,
+    NAME            VARCHAR,
+    TAX             NUMBER(10,2),
+    SALARY          NUMBER(12,2),
+    DOB             TIMESTAMP_NTZ,
+    COUNTRY         VARCHAR,
+
+    CREATED_AT      TIMESTAMP_NTZ   DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT      TIMESTAMP_NTZ,
+
+    -- FALSE = soft-deleted employee; never hard-delete from curated
+    IS_ACTIVE       BOOLEAN         DEFAULT TRUE
+
+);
+
+
+
+-- =============================================================================
+-- SECTION 15 : MERGE STORED PROCEDURE
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Wraps the MERGE statement in a stored procedure so that:
+--   1. Exceptions are caught and written to PIPELINE_ERROR_LOG
+--   2. The task body stays clean — it just calls the procedure
+--   3. Retry logic or pre/post-merge hooks can be added here later
+--
+-- MERGE LOGIC OVERVIEW
+-- -----------------------------------------------------------------------------
+--   Source  : Deduplicated stream snapshot (latest record per EMP_ID)
+--   Target  : DEV_DB.CURATED.EMP_DATA
+--
+--   WHEN MATCHED  + D  -> Soft delete  (IS_ACTIVE = FALSE)
+--   WHEN MATCHED  + U  -> Update fields
+--   WHEN MATCHED  + I  -> Update fields (idempotent re-insert protection)
+--   WHEN NOT MATCHED + I only -> Insert new row
+--
+-- DEDUPLICATION
+-- -----------------------------------------------------------------------------
+-- ROW_NUMBER() OVER (PARTITION BY EMP_ID ORDER BY LOAD_TIMESTAMP DESC) = 1
+-- Keeps the single latest record per employee when multiple rows arrive in
+-- the same stream batch, preventing "multiple source rows matched" errors.
+--
+-- DATA QUALITY GUARDS
+-- -----------------------------------------------------------------------------
+-- EMP_ID IS NOT NULL  : Rejects rows with no business key
+-- SALARY >= 0         : Rejects negative salary values
+-- Both filters applied in the source CTE before the MERGE.
+--
+-- ORPHANED UPDATE HANDLING
+-- -----------------------------------------------------------------------------
+-- WHEN NOT MATCHED only fires for OPERATION = 'I'.
+-- An UPDATE with no matching target row is silently ignored rather than
+-- inserting a potentially incomplete record. Add an alert here if needed.
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE DEV_DB.STAGE.SP_EMP_MERGE()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS CALLER
+
+AS
+$$
+DECLARE
+    v_rows_in_stream    NUMBER  DEFAULT 0;
+    v_error_code        VARCHAR DEFAULT '';
+    v_error_state       VARCHAR DEFAULT '';
+    v_error_message     VARCHAR DEFAULT '';
+
+BEGIN
+
+    -- -------------------------------------------------------------------------
+    -- Snapshot stream row count for error diagnostics
+    -- -------------------------------------------------------------------------
+    SELECT COUNT(*) INTO :v_rows_in_stream
+    FROM DEV_DB.STAGE.EMP_STREAM;
+
+    -- -------------------------------------------------------------------------
+    -- MERGE
+    -- -------------------------------------------------------------------------
+    MERGE INTO DEV_DB.CURATED.EMP_DATA AS T
+
+    USING
+    (
+        -- Deduplicate: keep the latest record per EMP_ID in this batch
+        -- Data quality: reject NULL keys and invalid salaries
+        SELECT
+            EMP_ID,
+            NAME,
+            TAX,
+            SALARY,
+            DOB,
+            COUNTRY,
+            OPERATION,
+            LOAD_TIMESTAMP
+
+        FROM
+        (
+            SELECT
+                EMP_ID,
+                NAME,
+                TAX,
+                SALARY,
+                DOB,
+                COUNTRY,
+                OPERATION,
+                LOAD_TIMESTAMP,
+
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY EMP_ID
+                    ORDER BY     LOAD_TIMESTAMP DESC
+                ) AS RN
+
+            FROM DEV_DB.STAGE.EMP_STREAM
+
+            -- Data quality guards applied before deduplication
+            WHERE EMP_ID  IS NOT NULL     -- Reject rows with no business key
+              AND SALARY   >= 0           -- Reject negative salaries
+        )
+
+        WHERE RN = 1
+
+    ) AS S
+
+    ON T.EMP_ID = S.EMP_ID
+
+
+    -- -------------------------------------------------------------------------
+    -- SOFT DELETE
+    -- -------------------------------------------------------------------------
+    -- Mark employee as inactive instead of physically removing the row.
+    -- Preserves full audit history in the curated layer.
+    -- -------------------------------------------------------------------------
+    WHEN MATCHED
+     AND S.OPERATION = 'D'
+
+    THEN UPDATE SET
+        T.IS_ACTIVE  = FALSE,
+        T.UPDATED_AT = CURRENT_TIMESTAMP()
+
+
+    -- -------------------------------------------------------------------------
+    -- UPDATE (and idempotent INSERT re-protection)
+    -- -------------------------------------------------------------------------
+    -- Handles:
+    --   U = standard field update
+    --   I = re-insert of an existing key (e.g. source replay / duplicate load)
+    -- -------------------------------------------------------------------------
+    WHEN MATCHED
+     AND S.OPERATION IN ('U', 'I')
+
+    THEN UPDATE SET
+        T.NAME       = S.NAME,
+        T.TAX        = S.TAX,
+        T.SALARY     = S.SALARY,
+        T.DOB        = S.DOB,
+        T.COUNTRY    = S.COUNTRY,
+        T.IS_ACTIVE  = TRUE,
+        T.UPDATED_AT = CURRENT_TIMESTAMP()
+
+
+    -- -------------------------------------------------------------------------
+    -- INSERT
+    -- -------------------------------------------------------------------------
+    -- Only genuine INSERT operations create new rows.
+    -- Orphaned UPDATEs (no matching target row) are intentionally ignored
+    -- to avoid inserting incomplete records from mid-stream change events.
+    -- -------------------------------------------------------------------------
+    WHEN NOT MATCHED
+     AND S.OPERATION = 'I'
+
+    THEN INSERT
+    (
+        EMP_ID,
+        NAME,
+        TAX,
+        SALARY,
+        DOB,
+        COUNTRY,
+        CREATED_AT,
+        UPDATED_AT,
+        IS_ACTIVE
+    )
+    VALUES
+    (
+        S.EMP_ID,
+        S.NAME,
+        S.TAX,
+        S.SALARY,
+        S.DOB,
+        S.COUNTRY,
+        CURRENT_TIMESTAMP(),
+        CURRENT_TIMESTAMP(),
+        TRUE
+    );
+
+    RETURN 'MERGE COMPLETED SUCCESSFULLY';
+
+EXCEPTION
+
+    -- -------------------------------------------------------------------------
+    -- Exception handler
+    -- -------------------------------------------------------------------------
+    -- Writes structured error details to PIPELINE_ERROR_LOG so failures
+    -- are visible without digging through TASK_HISTORY JSON payloads.
+    -- -------------------------------------------------------------------------
+    WHEN OTHER THEN
+
+        LET v_error_code    := SQLCODE;
+        LET v_error_state   := SQLSTATE;
+        LET v_error_message := SQLERRM;
+
+        INSERT INTO DEV_DB.STAGE.PIPELINE_ERROR_LOG
+        (
+            LOG_TIMESTAMP,
+            PROC_NAME,
+            ERROR_CODE,
+            ERROR_STATE,
+            ERROR_MESSAGE,
+            ROWS_IN_STREAM
+        )
+        VALUES
+        (
+            CURRENT_TIMESTAMP(),
+            'SP_EMP_MERGE',
+            :v_error_code,
+            :v_error_state,
+            :v_error_message,
+            :v_rows_in_stream
+        );
+
+        RETURN 'ERROR: ' || :v_error_message;
+
+END;
+$$;
+
+
+
+-- =============================================================================
+-- SECTION 16 : MERGE TASK
+-- =============================================================================
+-- PURPOSE
+-- -----------------------------------------------------------------------------
+-- Scheduled trigger that calls the merge stored procedure.
+--
+-- SCHEDULE : Every 5 minutes (was every minute in v1.0)
+-- GUARD    : SYSTEM$STREAM_HAS_DATA prevents warehouse spin-up on empty batches
+--
+-- NOTE
+-- -----------------------------------------------------------------------------
+-- Task must be RESUMED after creation — it starts in SUSPENDED state.
+-- =============================================================================
+
+CREATE OR REPLACE TASK DEV_DB.STAGE.EMP_MERGE_TASK
+
+    WAREHOUSE = COMPUTE_WH
+    SCHEDULE  = 'USING CRON */5 * * * * UTC'
+
+    WHEN SYSTEM$STREAM_HAS_DATA('DEV_DB.STAGE.EMP_STREAM')
+
+AS
+
+CALL DEV_DB.STAGE.SP_EMP_MERGE();
+
+
+
+-- =============================================================================
+-- SECTION 17 : ENABLE TASK
+-- =============================================================================
+
+ALTER TASK DEV_DB.STAGE.EMP_MERGE_TASK RESUME;
+
+
+
+-- =============================================================================
+-- SECTION 18 : MONITORING QUERIES
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- 18.1  Pipe status (JSON payload with pendingFileCount, notificationChannelName)
+-- -----------------------------------------------------------------------------
+SELECT SYSTEM$PIPE_STATUS('DEV_DB.STAGE.EMP_SNOWPIPE');
+
+
+-- -----------------------------------------------------------------------------
+-- 18.2  Pipe configuration details
+-- -----------------------------------------------------------------------------
+DESC PIPE DEV_DB.STAGE.EMP_SNOWPIPE;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.3  Force pipe refresh
+-- Use when files existed in S3 before the pipe was created
+-- -----------------------------------------------------------------------------
+ALTER PIPE DEV_DB.STAGE.EMP_SNOWPIPE REFRESH;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.4  Check whether stream has unconsumed data
+-- -----------------------------------------------------------------------------
+SELECT SYSTEM$STREAM_HAS_DATA('DEV_DB.STAGE.EMP_STREAM');
+
+
+-- -----------------------------------------------------------------------------
+-- 18.5  Inspect current stream contents
+-- -----------------------------------------------------------------------------
+SELECT * FROM DEV_DB.STAGE.EMP_STREAM;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.6  RAW table — recent loads
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM   DEV_DB.RAW.EMP_DATA_RAW
+ORDER BY LOAD_TIMESTAMP DESC
+LIMIT 100;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.7  CURATED table — active employees
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM   DEV_DB.CURATED.EMP_DATA
+WHERE  IS_ACTIVE = TRUE
+ORDER BY EMP_ID;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.8  CURATED table — soft-deleted employees (audit view)
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM   DEV_DB.CURATED.EMP_DATA
+WHERE  IS_ACTIVE = FALSE
+ORDER BY UPDATED_AT DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.9  File ingestion history (last 24h)
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM TABLE
+(
+    INFORMATION_SCHEMA.COPY_HISTORY
+    (
+        TABLE_NAME => 'EMP_DATA_RAW',
+        START_TIME => DATEADD(HOUR, -24, CURRENT_TIMESTAMP())
+    )
+);
+
+
+-- -----------------------------------------------------------------------------
+-- 18.10  Pipe load errors (last 24h)
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM TABLE
+(
+    VALIDATE_PIPE_LOAD
+    (
+        PIPE_NAME  => 'DEV_DB.STAGE.EMP_SNOWPIPE',
+        START_TIME => DATEADD(HOUR, -24, CURRENT_TIMESTAMP())
+    )
+);
+
+
+-- -----------------------------------------------------------------------------
+-- 18.11  Task execution history
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM TABLE
+(
+    INFORMATION_SCHEMA.TASK_HISTORY
+    (
+        TASK_NAME    => 'EMP_MERGE_TASK',
+        RESULT_LIMIT => 20
+    )
+);
+
+
+-- -----------------------------------------------------------------------------
+-- 18.12  Pipeline error log — most recent failures
+-- -----------------------------------------------------------------------------
+SELECT *
+FROM   DEV_DB.STAGE.PIPELINE_ERROR_LOG
+ORDER BY LOG_TIMESTAMP DESC
+LIMIT 50;
+
+
+-- -----------------------------------------------------------------------------
+-- 18.13  Data quality rejects — rows skipped by quality guards
+--        (in RAW but absent from CURATED, excluding soft-deletes)
+-- -----------------------------------------------------------------------------
+SELECT
+    r.EMP_ID,
+    r.NAME,
+    r.SALARY,
+    r.OPERATION,
+    r.LOAD_TIMESTAMP,
+    r.FILE_NAME,
+    r.FILE_ROW_NUMBER
+FROM       DEV_DB.RAW.EMP_DATA_RAW  r
+LEFT JOIN  DEV_DB.CURATED.EMP_DATA  c  ON r.EMP_ID = c.EMP_ID
+WHERE  c.EMP_ID  IS NULL
+  AND  r.OPERATION != 'D'
+  AND  (r.EMP_ID IS NULL OR r.SALARY < 0)
+ORDER BY r.LOAD_TIMESTAMP DESC;
+
+
+
+-- =============================================================================
+-- SECTION 19 : SAMPLE CSV FORMAT
+-- =============================================================================
+/*
+
+EMP_ID,NAME,TAX,SALARY,DOB,COUNTRY,OPERATION
+
+101,John,1000.00,50000.00,1990-01-15,USA,I
+
+101,John Smith,1200.00,55000.00,1990-01-15,USA,U
+
+102,Jane Doe,900.00,48000.00,1985-06-20,GBR,I
+
+101,John Smith,1200.00,55000.00,1990-01-15,USA,D
+
+*/
+
+
+
+-- =============================================================================
+-- END OF SCRIPT  v2.0
+-- =============================================================================
