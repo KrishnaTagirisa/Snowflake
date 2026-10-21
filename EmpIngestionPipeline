@@ -1,0 +1,398 @@
+/* =============================================================================
+PROJECT      : EMPLOYEE INGESTION PIPELINE
+PLATFORM     : SNOWFLAKE + AWS S3 + SNOWPIPE
+ENV          : PRODUCTION GRADE
+VERSION      : 2.2 (Hardened)
+LAST UPDATED : 2026-10-21
+
+CHANGES & BUG FIXES IMPLEMENTED (v2.1)
+------------------------------------------------------------------------------
+1. Object Order & Grants:
+   - Database, schemas, tables, and stages are created BEFORE object-level grants.
+   - Eliminates forward-reference compilation errors during script execution.
+   - Added EXECUTE TASK privilege to PIPELINE_ROLE at the account level.
+
+2. Deterministic Deduplication:
+   - Tie-breaker: ORDER BY LOAD_TIMESTAMP DESC, FILE_ROW_NUMBER DESC.
+   - Prevents arbitrary row selection when multiple events arrive in the same batch.
+
+3. Transactional Safety & Error Propagation:
+   - Wrapped MERGE in an explicit BEGIN TRANSACTION / COMMIT block.
+   - Stored procedure logs error to PIPELINE_ERROR_LOG on failure, executes
+     ROLLBACK, and re-throws with RAISE so TASK_HISTORY flags the run as FAILED.
+
+4. IS_ACTIVE State Integrity:
+   - OPERATION = 'U' modifies attributes without overriding soft-delete status.
+   - OPERATION = 'I' reactivates previously soft-deleted rows (IS_ACTIVE = TRUE).
+   - OPERATION = 'D' soft-deletes (IS_ACTIVE = FALSE).
+
+5. Serverless Task Configuration:
+   - Removed dedicated warehouse dependency on the task.
+   - Uses Snowflake-managed serverless compute to eliminate idle costs on a 5-min cadence.
+============================================================================= */
+
+
+-- =============================================================================
+-- SECTION 1 : DATABASE & SCHEMAS SETUP
+-- =============================================================================
+
+USE ROLE SYSADMIN;
+
+CREATE DATABASE IF NOT EXISTS DEV_DB;
+
+CREATE SCHEMA IF NOT EXISTS DEV_DB.RAW;
+CREATE SCHEMA IF NOT EXISTS DEV_DB.STAGE;
+CREATE SCHEMA IF NOT EXISTS DEV_DB.CURATED;
+
+
+-- =============================================================================
+-- SECTION 2 : WAREHOUSE (For manual/ad-hoc querying)
+-- =============================================================================
+
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH
+WITH
+    WAREHOUSE_SIZE      = 'XSMALL'
+    AUTO_SUSPEND        = 60
+    AUTO_RESUME         = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+
+-- =============================================================================
+-- SECTION 3 : CORE TABLES & LOGGING
+-- =============================================================================
+
+-- 3.1 Raw Ingestion Layer (Append-Only)
+CREATE OR REPLACE TABLE DEV_DB.RAW.EMP_DATA_RAW (
+    EMP_ID          VARCHAR,
+    NAME            VARCHAR,
+    TAX             NUMBER(10,2),
+    SALARY          NUMBER(12,2),
+    DOB             TIMESTAMP_NTZ,
+    COUNTRY         VARCHAR,
+    OPERATION       VARCHAR,
+    FILE_NAME       VARCHAR,
+    FILE_ROW_NUMBER NUMBER,
+    LOAD_TIMESTAMP  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PIPE_NAME       VARCHAR
+);
+
+-- 3.2 Curated Layer (Master Records)
+CREATE OR REPLACE TABLE DEV_DB.CURATED.EMP_DATA (
+    EMP_ID          VARCHAR,
+    NAME            VARCHAR,
+    TAX             NUMBER(10,2),
+    SALARY          NUMBER(12,2),
+    DOB             TIMESTAMP_NTZ,
+    COUNTRY         VARCHAR,
+    CREATED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_AT      TIMESTAMP_NTZ,
+    IS_ACTIVE       BOOLEAN       DEFAULT TRUE
+);
+
+-- 3.3 Pipeline Exception Logging
+CREATE TABLE IF NOT EXISTS DEV_DB.STAGE.PIPELINE_ERROR_LOG (
+    LOG_TIMESTAMP   TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PROC_NAME       VARCHAR,
+    ERROR_CODE      VARCHAR,
+    ERROR_STATE     VARCHAR,
+    ERROR_MESSAGE   VARCHAR,
+    ROWS_IN_STREAM  NUMBER
+);
+
+
+-- =============================================================================
+-- SECTION 4 : STORAGE INTEGRATION, FILE FORMAT & STAGE
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE STORAGE INTEGRATION DEV_S3_EMP_INT
+    TYPE                      = EXTERNAL_STAGE
+    STORAGE_PROVIDER          = S3
+    ENABLED                   = TRUE
+    STORAGE_AWS_ROLE_ARN      = 'arn:aws:iam::265230572780:role/role-aws-s3-bkt-ex'
+    STORAGE_ALLOWED_LOCATIONS = ('s3://aws-s3-bkt-ex/SnowflakeData/');
+
+DESC INTEGRATION DEV_S3_EMP_INT;
+
+USE ROLE SYSADMIN;
+
+CREATE OR REPLACE FILE FORMAT DEV_DB.STAGE.CSV_EMP_FORMAT
+    TYPE                           = CSV
+    FIELD_DELIMITER                = ','
+    SKIP_HEADER                    = 1
+    TRIM_SPACE                     = TRUE
+    FIELD_OPTIONALLY_ENCLOSED_BY   = '"'
+    NULL_IF                        = ('NULL', 'null', '')
+    EMPTY_FIELD_AS_NULL            = TRUE
+    ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE;
+
+CREATE OR REPLACE STAGE DEV_DB.STAGE.EMP_EXT_STAGE
+    URL                 = 's3://aws-s3-bkt-ex/SnowflakeData/'
+    STORAGE_INTEGRATION = DEV_S3_EMP_INT
+    FILE_FORMAT         = DEV_DB.STAGE.CSV_EMP_FORMAT;
+
+
+-- =============================================================================
+-- SECTION 5 : SNOWPIPE & STREAM
+-- =============================================================================
+
+CREATE OR REPLACE PIPE DEV_DB.STAGE.EMP_SNOWPIPE
+    AUTO_INGEST = TRUE
+AS
+COPY INTO DEV_DB.RAW.EMP_DATA_RAW
+(
+    EMP_ID,
+    NAME,
+    TAX,
+    SALARY,
+    DOB,
+    COUNTRY,
+    OPERATION,
+    FILE_NAME,
+    FILE_ROW_NUMBER,
+    LOAD_TIMESTAMP,
+    PIPE_NAME
+)
+FROM
+(
+    SELECT
+        $1,
+        $2,
+        $3,
+        $4,
+        TRY_TO_TIMESTAMP_NTZ($5, 'YYYY-MM-DD'),
+        $6,
+        UPPER($7),
+        METADATA$FILENAME,
+        METADATA$FILE_ROW_NUMBER,
+        CURRENT_TIMESTAMP(),
+        'EMP_SNOWPIPE'
+    FROM @DEV_DB.STAGE.EMP_EXT_STAGE
+)
+PATTERN  = '.*[.]csv'
+ON_ERROR = 'CONTINUE';
+
+-- Standard stream to track newly landed RAW records
+CREATE OR REPLACE STREAM DEV_DB.STAGE.EMP_STREAM
+    ON TABLE DEV_DB.RAW.EMP_DATA_RAW;
+
+
+-- =============================================================================
+-- SECTION 6 : MERGE STORED PROCEDURE
+-- =============================================================================
+
+CREATE OR REPLACE PROCEDURE DEV_DB.STAGE.SP_EMP_MERGE()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS CALLER
+AS
+$$
+DECLARE
+    v_error_code    VARCHAR DEFAULT '';
+    v_error_state   VARCHAR DEFAULT '';
+    v_error_message VARCHAR DEFAULT '';
+BEGIN
+
+    -- Atomic stream consumption
+    BEGIN TRANSACTION;
+
+    MERGE INTO DEV_DB.CURATED.EMP_DATA AS T
+    USING
+    (
+        SELECT
+            EMP_ID,
+            NAME,
+            TAX,
+            SALARY,
+            DOB,
+            COUNTRY,
+            OPERATION,
+            LOAD_TIMESTAMP
+        FROM
+        (
+            SELECT
+                EMP_ID,
+                NAME,
+                TAX,
+                SALARY,
+                DOB,
+                COUNTRY,
+                OPERATION,
+                LOAD_TIMESTAMP,
+                FILE_ROW_NUMBER,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY EMP_ID
+                    ORDER BY LOAD_TIMESTAMP DESC, FILE_ROW_NUMBER DESC
+                ) AS RN
+            FROM DEV_DB.STAGE.EMP_STREAM
+            WHERE EMP_ID IS NOT NULL
+              AND SALARY >= 0
+        )
+        WHERE RN = 1
+    ) AS S
+    ON T.EMP_ID = S.EMP_ID
+
+    -- Soft delete
+    WHEN MATCHED AND S.OPERATION = 'D' THEN
+        UPDATE SET
+            T.IS_ACTIVE  = FALSE,
+            T.UPDATED_AT = CURRENT_TIMESTAMP()
+
+    -- Normal update: updates values without re-activating soft-deleted records
+    WHEN MATCHED AND S.OPERATION = 'U' THEN
+        UPDATE SET
+            T.NAME       = S.NAME,
+            T.TAX        = S.TAX,
+            T.SALARY     = S.SALARY,
+            T.DOB        = S.DOB,
+            T.COUNTRY    = S.COUNTRY,
+            T.UPDATED_AT = CURRENT_TIMESTAMP()
+
+    -- Re-insert of existing key: reactivates and updates values
+    WHEN MATCHED AND S.OPERATION = 'I' THEN
+        UPDATE SET
+            T.NAME       = S.NAME,
+            T.TAX        = S.TAX,
+            T.SALARY     = S.SALARY,
+            T.DOB        = S.DOB,
+            T.COUNTRY    = S.COUNTRY,
+            T.IS_ACTIVE  = TRUE,
+            T.UPDATED_AT = CURRENT_TIMESTAMP()
+
+    -- Initial insert
+    WHEN NOT MATCHED AND S.OPERATION = 'I' THEN
+        INSERT
+        (
+            EMP_ID,
+            NAME,
+            TAX,
+            SALARY,
+            DOB,
+            COUNTRY,
+            CREATED_AT,
+            UPDATED_AT,
+            IS_ACTIVE
+        )
+        VALUES
+        (
+            S.EMP_ID,
+            S.NAME,
+            S.TAX,
+            S.SALARY,
+            S.DOB,
+            S.COUNTRY,
+            CURRENT_TIMESTAMP(),
+            CURRENT_TIMESTAMP(),
+            TRUE
+        );
+
+    COMMIT;
+    RETURN 'MERGE COMPLETED SUCCESSFULLY';
+
+EXCEPTION
+    WHEN OTHER THEN
+        ROLLBACK;
+        v_error_code    := SQLCODE;
+        v_error_state   := SQLSTATE;
+        v_error_message := SQLERRM;
+
+        INSERT INTO DEV_DB.STAGE.PIPELINE_ERROR_LOG
+        (
+            LOG_TIMESTAMP,
+            PROC_NAME,
+            ERROR_CODE,
+            ERROR_STATE,
+            ERROR_MESSAGE,
+            ROWS_IN_STREAM
+        )
+        VALUES
+        (
+            CURRENT_TIMESTAMP(),
+            'SP_EMP_MERGE',
+            :v_error_code,
+            :v_error_state,
+            :v_error_message,
+            -1
+        );
+
+        -- Signal task failure to Snowflake system monitoring
+        RAISE;
+END;
+$$;
+
+
+-- =============================================================================
+-- SECTION 7 : MERGE TASK (Serverless Model)
+-- =============================================================================
+
+CREATE OR REPLACE TASK DEV_DB.STAGE.EMP_MERGE_TASK
+    USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'XSMALL'
+    SCHEDULE = 'USING CRON */5 * * * * UTC'
+    WHEN SYSTEM$STREAM_HAS_DATA('DEV_DB.STAGE.EMP_STREAM')
+AS
+CALL DEV_DB.STAGE.SP_EMP_MERGE();
+
+
+-- =============================================================================
+-- SECTION 8 : RBAC & PERMISSIONS
+-- =============================================================================
+-- Executed after all objects exist to avoid forward-reference compilation errors.
+-- =============================================================================
+
+USE ROLE ACCOUNTADMIN;
+
+CREATE ROLE IF NOT EXISTS PIPELINE_ROLE;
+GRANT ROLE PIPELINE_ROLE TO ROLE SYSADMIN;
+
+-- Account-level task execution privileges
+GRANT EXECUTE TASK ON ACCOUNT TO ROLE PIPELINE_ROLE;
+
+-- Database & schema access
+GRANT USAGE ON DATABASE DEV_DB              TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.RAW          TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.STAGE        TO ROLE PIPELINE_ROLE;
+GRANT USAGE ON SCHEMA   DEV_DB.CURATED      TO ROLE PIPELINE_ROLE;
+
+-- Object-level access
+GRANT SELECT, INSERT          ON TABLE DEV_DB.RAW.EMP_DATA_RAW         TO ROLE PIPELINE_ROLE;
+GRANT SELECT, INSERT, UPDATE  ON TABLE DEV_DB.CURATED.EMP_DATA         TO ROLE PIPELINE_ROLE;
+GRANT SELECT, INSERT          ON TABLE DEV_DB.STAGE.PIPELINE_ERROR_LOG TO ROLE PIPELINE_ROLE;
+GRANT SELECT                  ON STREAM DEV_DB.STAGE.EMP_STREAM        TO ROLE PIPELINE_ROLE;
+GRANT USAGE                   ON STAGE DEV_DB.STAGE.EMP_EXT_STAGE      TO ROLE PIPELINE_ROLE;
+GRANT OPERATE, MONITOR        ON PIPE DEV_DB.STAGE.EMP_SNOWPIPE        TO ROLE PIPELINE_ROLE;
+GRANT OPERATE, MONITOR        ON TASK DEV_DB.STAGE.EMP_MERGE_TASK      TO ROLE PIPELINE_ROLE;
+GRANT USAGE                   ON PROCEDURE DEV_DB.STAGE.SP_EMP_MERGE() TO ROLE PIPELINE_ROLE;
+
+
+-- =============================================================================
+-- SECTION 9 : RESUME TASK
+-- =============================================================================
+
+USE ROLE SYSADMIN;
+ALTER TASK DEV_DB.STAGE.EMP_MERGE_TASK RESUME;
+
+
+-- =============================================================================
+-- SECTION 10 : VERIFICATION & AUDIT QUERIES
+-- =============================================================================
+
+-- Inspect pipe status & SQS ARN
+SELECT SYSTEM$PIPE_STATUS('DEV_DB.STAGE.EMP_SNOWPIPE');
+
+-- Verify stream state
+SELECT SYSTEM$STREAM_HAS_DATA('DEV_DB.STAGE.EMP_STREAM');
+
+-- Inspect serverless task executions
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    TASK_NAME => 'EMP_MERGE_TASK',
+    RESULT_LIMIT => 10
+));
+
+-- View recorded errors (if any)
+SELECT *
+FROM DEV_DB.STAGE.PIPELINE_ERROR_LOG
+ORDER BY LOG_TIMESTAMP DESC
+LIMIT 20;
