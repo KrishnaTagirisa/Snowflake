@@ -1,0 +1,11 @@
+version: 2
+sources:
+  - name: bronze
+    database: CRM_ANALYTICS
+    schema: BRONZE
+    tables:
+      - name: cdc_events
+        loaded_at_field: INGESTED_AT
+        freshness:
+          warn_after: {count: 15, period: minute}
+          error_after: {count: 60, period: minute}

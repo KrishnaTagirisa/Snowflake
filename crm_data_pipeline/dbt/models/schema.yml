@@ -1,0 +1,57 @@
+version: 2
+models:
+  - name: stg_crm_events
+    columns:
+      - name: entity
+        data_tests: [not_null]
+      - name: event_id
+        data_tests: [not_null]
+  - name: silver_customer_events
+    columns:
+      - name: event_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests: [not_null]
+  - name: silver_order_events
+    columns:
+      - name: event_id
+        data_tests: [not_null, unique]
+      - name: order_id
+        data_tests: [not_null]
+  - name: silver_product_events
+    columns:
+      - name: event_id
+        data_tests: [not_null, unique]
+      - name: product_id
+        data_tests: [not_null]
+  - name: silver_customers_current
+    columns:
+      - name: customer_id
+        data_tests: [not_null, unique]
+  - name: silver_orders_current
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments: {to: ref('silver_customers_current'), field: customer_id}
+              config: {severity: warn}
+  - name: silver_products_current
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+  - name: dim_customers
+    columns:
+      - name: customer_id
+        data_tests: [not_null, unique]
+  - name: dim_products
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+  - name: fct_orders
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: gross_line_amount
+        data_tests: [not_null]

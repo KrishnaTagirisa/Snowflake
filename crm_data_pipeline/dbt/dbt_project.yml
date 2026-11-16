@@ -1,0 +1,23 @@
+name: crm_medallion
+version: '1.0.0'
+config-version: 2
+profile: crm_medallion
+model-paths: ["models"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+clean-targets: ["target", "dbt_packages"]
+models:
+  crm_medallion:
+    staging:
+      +materialized: view
+      +schema: silver
+    silver:
+      +materialized: incremental
+      +incremental_strategy: merge
+      +on_schema_change: append_new_columns
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
+vars:
+  crm_lookback_hours: 72
