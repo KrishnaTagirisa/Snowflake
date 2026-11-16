@@ -1,44 +1,306 @@
-creating resource monitor
-
-use role accountadmin;
-use warehouse compute_wh;
-use database snowflake;
-use schema account_usage;
-
-
--- WareHouse Metering history
-Select * from warehouse_metering_history; -- this has some latency as it is from account_usage schema
-
--- Total credits grouped by warehouse;
-SELECT WAREHOUSE_NAME,
-       SUM(CREDITS_USED) AS TOTAL_CREDITS_USED
-FROM WAREHOUSE_METERING_HISTORY
-WHERE START_TIME >= DATE_TRUNC(MONTH, CURRENT_DATE)
-GROUP BY 1
-ORDER BY 2 DESC;
+-- ============================================================================
+-- SNOWFLAKE RESOURCE MONITORING & COST MANAGEMENT
+-- ============================================================================
+-- Purpose:
+--   1. Review warehouse credit consumption.
+--   2. Monitor resource monitor configuration and usage.
+--   3. Identify expensive warehouses and long-running queries.
+--   4. Analyze warehouse load, queuing, and lifecycle events.
+--   5. Configure resource monitors and access permissions.
+--
+-- Important:
+--   ACCOUNT_USAGE views may have reporting latency.
+--   INFORMATION_SCHEMA functions generally provide more recent data.
+--   Resource monitors primarily control virtual warehouse credit usage.
+-- ============================================================================
 
 
--- Warehouse metering history using the Information Schema; this has no latency as it is coming from information_schema
+-- ============================================================================
+-- 01. SET EXECUTION CONTEXT
+-- ============================================================================
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE COMPUTE_WH;
+USE DATABASE SNOWFLAKE;
+USE SCHEMA ACCOUNT_USAGE;
+
+
+-- ============================================================================
+-- 02. VIEW WAREHOUSE METERING HISTORY
+-- ============================================================================
+-- Review warehouse credit consumption and metering details.
+-- Source: SNOWFLAKE.ACCOUNT_USAGE
+-- Note: Account Usage data is subject to latency.
+
 SELECT *
-FROM TABLE(INFORMATION_SCHEMA.WAREHOUSE_METERING_HISTORY(dateadd('days',-7,current_date())));
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+ORDER BY START_TIME DESC;
 
 
--- Set context
-USE DATABASE SNOWFLAKE_SAMPLE_DATA;
-USE SCHEMA TPCH_SF1000;
+-- ============================================================================
+-- 03. MONTHLY CREDIT CONSUMPTION BY WAREHOUSE
+-- ============================================================================
+-- Calculate total credits consumed by each warehouse in the current month.
+-- Sort warehouses from highest to lowest credit consumption.
 
--- creating a resource monitor with 10 credits to reset every week with appropriate actions and notifications
-create resource monitor "VW_10" with Credit_quota = 10, frequency ='WEEKLY'
-start_timestamp = 'IMMEDIATELY' end_timestamp = NULL 
-triggers 
-on 95 percent do suspend_immediate
-on 50 percent do notify;
+SELECT
+    WAREHOUSE_NAME,
+    SUM(CREDITS_USED) AS TOTAL_CREDITS_USED,
+    SUM(CREDITS_USED_COMPUTE) AS COMPUTE_CREDITS,
+    SUM(CREDITS_USED_CLOUD_SERVICES) AS CLOUD_SERVICES_CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE START_TIME >= DATE_TRUNC('MONTH', CURRENT_DATE())
+GROUP BY WAREHOUSE_NAME
+ORDER BY TOTAL_CREDITS_USED DESC;
 
--- set the resource monitor at warehouse level
-alter warehouse "COMPUTE_WH" SET REsource_monitor = 'VW_10';
 
--- we can set the resource monitor at account level as below
--- alter account set resource_monitor = 'VW_10';
+-- ============================================================================
+-- 04. DAILY CREDIT CONSUMPTION BY WAREHOUSE
+-- ============================================================================
+-- Analyze daily credit consumption over the last seven days.
+-- Useful for identifying usage spikes and unexpected consumption.
 
--- adding additional roles to view and alter the configuration of above resource monitor
-grant monitor, modify on resource monitor "VW_10" to role sysadmin;
+SELECT
+    DATE_TRUNC('DAY', START_TIME) AS USAGE_DATE,
+    WAREHOUSE_NAME,
+    SUM(CREDITS_USED) AS TOTAL_CREDITS_USED,
+    SUM(CREDITS_USED_COMPUTE) AS COMPUTE_CREDITS,
+    SUM(CREDITS_USED_CLOUD_SERVICES) AS CLOUD_SERVICES_CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE START_TIME >= DATEADD('DAY', -7, CURRENT_TIMESTAMP())
+GROUP BY
+    DATE_TRUNC('DAY', START_TIME),
+    WAREHOUSE_NAME
+ORDER BY
+    USAGE_DATE DESC,
+    TOTAL_CREDITS_USED DESC;
+
+
+-- ============================================================================
+-- 05. RECENT WAREHOUSE METERING USING INFORMATION_SCHEMA
+-- ============================================================================
+-- Retrieve warehouse metering data for the last seven days.
+-- Information Schema is useful when more recent data is required.
+-- Note: The function's supported history window and arguments apply.
+
+SELECT *
+FROM TABLE(
+    SNOWFLAKE.INFORMATION_SCHEMA.WAREHOUSE_METERING_HISTORY(
+        DATE_RANGE_START => DATEADD('DAY', -7, CURRENT_TIMESTAMP()),
+        DATE_RANGE_END   => CURRENT_TIMESTAMP()
+    )
+)
+ORDER BY START_TIME DESC;
+
+
+-- ============================================================================
+-- 06. LIST ALL RESOURCE MONITORS
+-- ============================================================================
+-- Display resource monitors available to the current role.
+
+SHOW RESOURCE MONITORS;
+
+
+-- ============================================================================
+-- 07. DESCRIBE A RESOURCE MONITOR
+-- ============================================================================
+-- Inspect the configuration of a specific resource monitor.
+
+DESC RESOURCE MONITOR VW_10;
+
+
+-- ============================================================================
+-- 08. REVIEW RESOURCE MONITOR METADATA
+-- ============================================================================
+-- Query account-level resource monitor metadata.
+-- Note: ACCOUNT_USAGE data may have latency.
+
+SELECT *
+FROM SNOWFLAKE.ACCOUNT_USAGE.RESOURCE_MONITORS
+ORDER BY NAME;
+
+
+-- ============================================================================
+-- 09. VIEW WAREHOUSE CONFIGURATION
+-- ============================================================================
+-- List warehouses and their current configuration.
+
+SHOW WAREHOUSES;
+
+
+-- ============================================================================
+-- 10. DESCRIBE A SPECIFIC WAREHOUSE
+-- ============================================================================
+-- Inspect warehouse properties, including size and operating settings.
+
+DESC WAREHOUSE COMPUTE_WH;
+
+
+-- ============================================================================
+-- 11. REVIEW WAREHOUSE PARAMETERS
+-- ============================================================================
+-- Check settings such as AUTO_SUSPEND and AUTO_RESUME.
+-- These settings can help reduce unnecessary warehouse consumption.
+
+SHOW PARAMETERS IN WAREHOUSE COMPUTE_WH;
+
+
+-- ============================================================================
+-- 12. FIND LONG-RUNNING QUERIES
+-- ============================================================================
+-- Review queries executed in the last 24 hours.
+-- Sort by elapsed execution time to identify potential performance issues.
+
+SELECT
+    QUERY_ID,
+    QUERY_TYPE,
+    USER_NAME,
+    WAREHOUSE_NAME,
+    START_TIME,
+    TOTAL_ELAPSED_TIME / 1000 AS ELAPSED_SECONDS,
+    EXECUTION_STATUS,
+    QUERY_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('HOUR', -24, CURRENT_TIMESTAMP())
+  AND WAREHOUSE_NAME IS NOT NULL
+ORDER BY TOTAL_ELAPSED_TIME DESC
+LIMIT 100;
+
+
+-- ============================================================================
+-- 13. FIND CURRENTLY RUNNING QUERIES
+-- ============================================================================
+-- Identify queries that are still running.
+-- Information Schema provides recent query history.
+-- RESULT_LIMIT restricts the number of returned records.
+
+SELECT
+    QUERY_ID,
+    QUERY_TYPE,
+    SESSION_ID,
+    USER_NAME,
+    WAREHOUSE_NAME,
+    EXECUTION_STATUS,
+    START_TIME,
+    TOTAL_ELAPSED_TIME,
+    QUERY_TEXT
+FROM TABLE(
+    SNOWFLAKE.INFORMATION_SCHEMA.QUERY_HISTORY(
+        END_TIME_RANGE_START => DATEADD('HOUR', -1, CURRENT_TIMESTAMP()),
+        RESULT_LIMIT => 100
+    )
+)
+WHERE EXECUTION_STATUS = 'RUNNING'
+ORDER BY START_TIME DESC;
+
+
+-- ============================================================================
+-- 14. ANALYZE WAREHOUSE LOAD AND QUEUING
+-- ============================================================================
+-- Identify warehouses experiencing query queuing or blocking.
+-- Useful for diagnosing concurrency and workload bottlenecks.
+-- Note: ACCOUNT_USAGE data may have latency.
+
+SELECT
+    WAREHOUSE_NAME,
+    START_TIME,
+    AVG_RUNNING,
+    AVG_QUEUED_LOAD,
+    AVG_QUEUED_PROVISIONING,
+    AVG_BLOCKED
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
+WHERE START_TIME >= DATEADD('DAY', -1, CURRENT_TIMESTAMP())
+ORDER BY
+    AVG_QUEUED_LOAD DESC,
+    START_TIME DESC;
+
+
+-- ============================================================================
+-- 15. REVIEW WAREHOUSE LIFECYCLE EVENTS
+-- ============================================================================
+-- Inspect warehouse events from the past seven days.
+-- Useful for investigating warehouse suspension, resumption, and resizing.
+-- Confirm available event columns in your Snowflake environment.
+
+SELECT *
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
+WHERE TIMESTAMP >= DATEADD('DAY', -7, CURRENT_TIMESTAMP())
+ORDER BY TIMESTAMP DESC;
+
+
+-- ============================================================================
+-- 16. CREATE A RESOURCE MONITOR
+-- ============================================================================
+-- Resource Monitor : VW_10
+-- Credit Quota     : 10 credits
+-- Reset Frequency  : Weekly
+-- Start Time       : Immediately
+--
+-- Trigger 1:
+--   At 50% of quota (5 credits), send a notification.
+--
+-- Trigger 2:
+--   At 95% of quota (9.5 credits), suspend the warehouse immediately.
+--
+-- Important:
+--   Configure and verify notification delivery separately.
+--   Suspension is not a strict guarantee that usage cannot exceed the quota.
+
+CREATE RESOURCE MONITOR VW_10
+    WITH
+        CREDIT_QUOTA = 10
+        FREQUENCY = WEEKLY
+        START_TIMESTAMP = IMMEDIATELY
+        END_TIMESTAMP = NULL
+    TRIGGERS
+        ON 50 PERCENT DO NOTIFY
+        ON 95 PERCENT DO SUSPEND_IMMEDIATE;
+
+
+-- ============================================================================
+-- 17. ASSIGN THE RESOURCE MONITOR TO A WAREHOUSE
+-- ============================================================================
+-- Apply VW_10 to COMPUTE_WH.
+-- A warehouse can have only one directly assigned warehouse-level monitor.
+
+ALTER WAREHOUSE COMPUTE_WH
+    SET RESOURCE_MONITOR = VW_10;
+
+
+-- ============================================================================
+-- 18. ASSIGN A RESOURCE MONITOR AT THE ACCOUNT LEVEL
+-- ============================================================================
+-- OPTIONAL:
+-- Uncomment this statement to apply the monitor at the account level.
+--
+-- Account-level monitoring covers applicable warehouse consumption
+-- across the account, while warehouse-level monitors apply to assigned
+-- warehouses. Both levels can apply simultaneously when configured.
+--
+-- ALTER ACCOUNT SET RESOURCE_MONITOR = VW_10;
+
+
+-- ============================================================================
+-- 19. GRANT RESOURCE MONITOR PERMISSIONS
+-- ============================================================================
+-- Allow SYSADMIN to inspect and modify the resource monitor configuration.
+-- Execute as a role with the required grant privileges.
+
+GRANT MONITOR, MODIFY
+    ON RESOURCE MONITOR VW_10
+    TO ROLE SYSADMIN;
+
+
+-- ============================================================================
+-- 20. VERIFY WAREHOUSE-LEVEL MONITOR ASSIGNMENT
+-- ============================================================================
+-- Review the warehouse configuration after assignment.
+
+SHOW WAREHOUSES;
+
+DESC WAREHOUSE COMPUTE_WH;
+
+
+-- ============================================================================
+-- END OF RESOURCE MONITORING SCRIPT
+-- ============================================================================
