@@ -1,0 +1,44 @@
+creating resource monitor
+
+use role accountadmin;
+use warehouse compute_wh;
+use database snowflake;
+use schema account_usage;
+
+
+-- WareHouse Metering history
+Select * from warehouse_metering_history; -- this has some latency as it is from account_usage schema
+
+-- Total credits grouped by warehouse;
+SELECT WAREHOUSE_NAME,
+       SUM(CREDITS_USED) AS TOTAL_CREDITS_USED
+FROM WAREHOUSE_METERING_HISTORY
+WHERE START_TIME >= DATE_TRUNC(MONTH, CURRENT_DATE)
+GROUP BY 1
+ORDER BY 2 DESC;
+
+
+-- Warehouse metering history using the Information Schema; this has no latency as it is coming from information_schema
+SELECT *
+FROM TABLE(INFORMATION_SCHEMA.WAREHOUSE_METERING_HISTORY(dateadd('days',-7,current_date())));
+
+
+-- Set context
+USE DATABASE SNOWFLAKE_SAMPLE_DATA;
+USE SCHEMA TPCH_SF1000;
+
+-- creating a resource monitor with 10 credits to reset every week with appropriate actions and notifications
+create resource monitor "VW_10" with Credit_quota = 10, frequency ='WEEKLY'
+start_timestamp = 'IMMEDIATELY' end_timestamp = NULL 
+triggers 
+on 95 percent do suspend_immediate
+on 50 percent do notify;
+
+-- set the resource monitor at warehouse level
+alter warehouse "COMPUTE_WH" SET REsource_monitor = 'VW_10';
+
+-- we can set the resource monitor at account level as below
+-- alter account set resource_monitor = 'VW_10';
+
+-- adding additional roles to view and alter the configuration of above resource monitor
+grant monitor, modify on resource monitor "VW_10" to role sysadmin;
