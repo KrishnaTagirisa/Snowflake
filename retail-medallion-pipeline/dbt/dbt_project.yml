@@ -1,0 +1,53 @@
+name: retail_medallion
+version: "1.0.0"
+config-version: 2
+profile: retail_medallion
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # Re-process this many hours behind the current high-water mark so late-arriving
+  # bronze rows are still merged. Override per run: --vars '{lookback_hours: 72}'
+  lookback_hours: 24
+  dim_date_start: "2020-01-01"
+  dim_date_end: "2030-12-31"
+
+models:
+  retail_medallion:
+    +persist_docs:
+      relation: true
+      columns: true
+    +query_tag: "dbt_retail_medallion"
+
+    silver:
+      +schema: silver
+      +tags: ["silver"]
+      +materialized: incremental
+      +incremental_strategy: merge
+      +on_schema_change: append_new_columns
+      +snowflake_warehouse: TRANSFORM_WH
+
+    gold:
+      +schema: gold
+      +tags: ["gold"]
+      +materialized: table
+      +snowflake_warehouse: TRANSFORM_WH
+      +post-hook:
+        - "{{ grant_select('RETAIL_REPORTER') }}"
+
+snapshots:
+  retail_medallion:
+    +tags: ["silver"]
+    +snowflake_warehouse: TRANSFORM_WH
+
+data_tests:
+  retail_medallion:
+    +severity: error
+    +store_failures: true
+    +schema: audit

@@ -1,0 +1,33 @@
+# Credentials come only from environment variables (populated by Airflow from
+# AWS Secrets Manager, or by your shell locally). Nothing secret is committed.
+retail_medallion:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE', '') }}"
+      role: RETAIL_TRANSFORMER
+      warehouse: TRANSFORM_WH
+      database: RETAIL_DEV
+      schema: "dbt_{{ env_var('USER', 'dev') | lower }}"
+      threads: 8
+      client_session_keep_alive: false
+      query_tag: dbt_dev
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE', '') }}"
+      role: RETAIL_TRANSFORMER
+      warehouse: TRANSFORM_WH
+      database: RETAIL_PROD
+      schema: silver
+      threads: 8
+      query_tag: dbt_prod

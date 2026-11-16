@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadLandingObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::acme-retail-landing/retail/*"
+    },
+    {
+      "Sid": "ListLandingPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::acme-retail-landing",
+      "Condition": { "StringLike": { "s3:prefix": ["retail/*"] } }
+    },
+    {
+      "Sid": "DecryptWithLandingKey",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt"],
+      "Resource": "arn:aws:kms:eu-west-2:<AWS_ACCOUNT_ID>:key/<KMS_KEY_ID>"
+    }
+  ]
+}

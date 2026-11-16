@@ -1,0 +1,125 @@
+-- =============================================================================
+-- 01_account_setup.sql
+-- One-off platform setup: roles, warehouses, database, schemas, service user.
+-- Run as SECURITYADMIN / SYSADMIN (ACCOUNTADMIN only for the integration in 02).
+-- Replace RETAIL_PROD with RETAIL_DEV to build the dev environment.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 1. Functional roles (RBAC)
+-- -----------------------------------------------------------------------------
+USE ROLE SECURITYADMIN;
+
+CREATE ROLE IF NOT EXISTS RETAIL_LOADER      COMMENT = 'Loads raw files into BRONZE (Airflow COPY INTO / Snowpipe)';
+CREATE ROLE IF NOT EXISTS RETAIL_TRANSFORMER COMMENT = 'Runs dbt: reads BRONZE, builds SILVER and GOLD';
+CREATE ROLE IF NOT EXISTS RETAIL_REPORTER    COMMENT = 'Read-only access to GOLD for Power BI / analysts';
+
+-- Role hierarchy: everything rolls up to SYSADMIN so admins can manage objects
+GRANT ROLE RETAIL_LOADER      TO ROLE SYSADMIN;
+GRANT ROLE RETAIL_TRANSFORMER TO ROLE SYSADMIN;
+GRANT ROLE RETAIL_REPORTER    TO ROLE SYSADMIN;
+
+-- -----------------------------------------------------------------------------
+-- 2. Warehouses split by workload (isolation + cost attribution)
+-- -----------------------------------------------------------------------------
+USE ROLE SYSADMIN;
+
+CREATE WAREHOUSE IF NOT EXISTS LOAD_WH
+  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE
+  COMMENT = 'COPY INTO / ingestion';
+
+CREATE WAREHOUSE IF NOT EXISTS TRANSFORM_WH
+  WAREHOUSE_SIZE = 'SMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE
+  COMMENT = 'dbt transformations';
+
+CREATE WAREHOUSE IF NOT EXISTS BI_WH
+  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 300 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE
+  MIN_CLUSTER_COUNT = 1 MAX_CLUSTER_COUNT = 3 SCALING_POLICY = 'STANDARD'
+  COMMENT = 'Power BI / ad-hoc queries (multi-cluster for concurrency)';
+
+GRANT USAGE ON WAREHOUSE LOAD_WH      TO ROLE RETAIL_LOADER;
+GRANT USAGE ON WAREHOUSE TRANSFORM_WH TO ROLE RETAIL_TRANSFORMER;
+GRANT USAGE ON WAREHOUSE BI_WH        TO ROLE RETAIL_REPORTER;
+
+-- Cost guard-rail
+USE ROLE ACCOUNTADMIN;
+CREATE RESOURCE MONITOR IF NOT EXISTS RETAIL_MONTHLY_RM
+  WITH CREDIT_QUOTA = 200 FREQUENCY = MONTHLY START_TIMESTAMP = IMMEDIATELY
+  TRIGGERS ON 80 PERCENT DO NOTIFY
+           ON 100 PERCENT DO SUSPEND
+           ON 110 PERCENT DO SUSPEND_IMMEDIATE;
+ALTER WAREHOUSE LOAD_WH      SET RESOURCE_MONITOR = RETAIL_MONTHLY_RM;
+ALTER WAREHOUSE TRANSFORM_WH SET RESOURCE_MONITOR = RETAIL_MONTHLY_RM;
+ALTER WAREHOUSE BI_WH        SET RESOURCE_MONITOR = RETAIL_MONTHLY_RM;
+
+-- -----------------------------------------------------------------------------
+-- 3. Database and medallion schemas
+-- -----------------------------------------------------------------------------
+USE ROLE SYSADMIN;
+
+CREATE DATABASE IF NOT EXISTS RETAIL_PROD DATA_RETENTION_TIME_IN_DAYS = 7;
+
+CREATE SCHEMA IF NOT EXISTS RETAIL_PROD.BRONZE WITH MANAGED ACCESS COMMENT = 'Raw, immutable copies of source files';
+CREATE SCHEMA IF NOT EXISTS RETAIL_PROD.SILVER WITH MANAGED ACCESS COMMENT = 'Cleansed, typed, deduplicated, conformed';
+CREATE SCHEMA IF NOT EXISTS RETAIL_PROD.GOLD   WITH MANAGED ACCESS COMMENT = 'Business-ready star schema and marts';
+CREATE SCHEMA IF NOT EXISTS RETAIL_PROD.AUDIT  WITH MANAGED ACCESS COMMENT = 'Load logs and pipeline metadata';
+
+-- dbt snapshots live in SILVER (history is a conformed asset, not a mart)
+
+-- -----------------------------------------------------------------------------
+-- 4. Grants (current + future objects)
+-- -----------------------------------------------------------------------------
+USE ROLE SECURITYADMIN;
+
+GRANT USAGE ON DATABASE RETAIL_PROD TO ROLE RETAIL_LOADER;
+GRANT USAGE ON DATABASE RETAIL_PROD TO ROLE RETAIL_TRANSFORMER;
+GRANT USAGE ON DATABASE RETAIL_PROD TO ROLE RETAIL_REPORTER;
+
+-- Loader: owns writes into BRONZE and AUDIT
+GRANT USAGE, CREATE TABLE, CREATE STAGE, CREATE FILE FORMAT, CREATE PIPE
+  ON SCHEMA RETAIL_PROD.BRONZE TO ROLE RETAIL_LOADER;
+GRANT USAGE, CREATE TABLE ON SCHEMA RETAIL_PROD.AUDIT TO ROLE RETAIL_LOADER;
+GRANT SELECT, INSERT ON FUTURE TABLES IN SCHEMA RETAIL_PROD.BRONZE TO ROLE RETAIL_LOADER;
+GRANT SELECT, INSERT ON FUTURE TABLES IN SCHEMA RETAIL_PROD.AUDIT  TO ROLE RETAIL_LOADER;
+
+-- Transformer: reads BRONZE + AUDIT, builds SILVER + GOLD
+GRANT USAGE ON SCHEMA RETAIL_PROD.BRONZE TO ROLE RETAIL_TRANSFORMER;
+GRANT USAGE, CREATE TABLE ON SCHEMA RETAIL_PROD.AUDIT TO ROLE RETAIL_TRANSFORMER;  -- dbt store_failures
+GRANT SELECT ON ALL TABLES    IN SCHEMA RETAIL_PROD.BRONZE TO ROLE RETAIL_TRANSFORMER;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA RETAIL_PROD.BRONZE TO ROLE RETAIL_TRANSFORMER;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA RETAIL_PROD.AUDIT  TO ROLE RETAIL_TRANSFORMER;
+GRANT USAGE, CREATE TABLE, CREATE VIEW ON SCHEMA RETAIL_PROD.SILVER TO ROLE RETAIL_TRANSFORMER;
+GRANT USAGE, CREATE TABLE, CREATE VIEW ON SCHEMA RETAIL_PROD.GOLD   TO ROLE RETAIL_TRANSFORMER;
+
+-- Reporter: GOLD only
+GRANT USAGE ON SCHEMA RETAIL_PROD.GOLD TO ROLE RETAIL_REPORTER;
+GRANT SELECT ON ALL TABLES    IN SCHEMA RETAIL_PROD.GOLD TO ROLE RETAIL_REPORTER;
+GRANT SELECT ON FUTURE TABLES IN SCHEMA RETAIL_PROD.GOLD TO ROLE RETAIL_REPORTER;
+GRANT SELECT ON ALL VIEWS     IN SCHEMA RETAIL_PROD.GOLD TO ROLE RETAIL_REPORTER;
+GRANT SELECT ON FUTURE VIEWS  IN SCHEMA RETAIL_PROD.GOLD TO ROLE RETAIL_REPORTER;
+
+-- -----------------------------------------------------------------------------
+-- 5. Service users (key-pair auth, no passwords)
+--    Generate keys:  openssl genrsa 2048 | openssl pkcs8 -topk8 -v2 aes256 -inform PEM -out rsa_key.p8
+--                    openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+-- -----------------------------------------------------------------------------
+USE ROLE SECURITYADMIN;
+
+CREATE USER IF NOT EXISTS SVC_AIRFLOW
+  TYPE = SERVICE
+  DEFAULT_ROLE = RETAIL_LOADER
+  DEFAULT_WAREHOUSE = LOAD_WH
+  RSA_PUBLIC_KEY = '<paste rsa_key.pub body here>'
+  COMMENT = 'Airflow: bronze loads + dbt runs';
+
+GRANT ROLE RETAIL_LOADER      TO USER SVC_AIRFLOW;
+GRANT ROLE RETAIL_TRANSFORMER TO USER SVC_AIRFLOW;
+
+CREATE USER IF NOT EXISTS SVC_POWERBI
+  TYPE = SERVICE
+  DEFAULT_ROLE = RETAIL_REPORTER
+  DEFAULT_WAREHOUSE = BI_WH
+  RSA_PUBLIC_KEY = '<paste rsa_key.pub body here>'
+  COMMENT = 'Power BI service account';
+
+GRANT ROLE RETAIL_REPORTER TO USER SVC_POWERBI;

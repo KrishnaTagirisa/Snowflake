@@ -1,0 +1,4 @@
+product_id,product_name,category,sub_category,brand,unit_price,currency,is_active,updated_at
+P100,Trail Running Shoe,footwear,running,Stride,89.99,GBP,true,2026-01-01 00:00:00
+P200,Waterproof Jacket,apparel,outerwear,Northline,"1,249.00",GBP,true,2026-01-01 00:00:00
+P300,Insulated Bottle,accessories,,Hydra,24.50,,1,2026-01-01 00:00:00

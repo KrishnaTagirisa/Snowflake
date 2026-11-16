@@ -1,0 +1,5 @@
+customer_id,first_name,last_name,email,phone,city,country,segment,created_at,updated_at
+C001,priya,sharma,priya.sharma@example.com,07700 900001,coventry,GB,small_business,2025-03-01 09:00:00,2026-11-11 14:05:00
+C002,tom,baker,tom.baker@example.com,,london,GB,corporate,2025-06-10 12:00:00,2025-06-10 12:00:00
+C003,aisha,khan,aisha.khan@example,07700 900003,leeds,GB,,2026-01-15 08:30:00,2026-01-15 08:30:00
+C004,liam,o'neil,liam@example.co.uk,+44 7700 900004,manchester,GB,consumer,2026-11-11 16:00:00,2026-11-11 16:00:00

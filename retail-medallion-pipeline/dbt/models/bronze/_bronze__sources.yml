@@ -1,0 +1,42 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw OMS extracts loaded by Airflow COPY INTO (or Snowpipe). Append-only.
+    database: "{{ 'RETAIL_PROD' if target.name == 'prod' else 'RETAIL_DEV' }}"
+    schema: BRONZE
+    config:
+      tags: ["silver"]   # so the silver Airflow task group checks freshness first
+      loaded_at_field: _loaded_at
+      freshness:
+        warn_after: { count: 26, period: hour }
+        error_after: { count: 50, period: hour }
+
+    tables:
+      - name: customers_raw
+        identifier: CUSTOMERS_RAW
+        description: Daily full snapshot of customers (CSV, all VARCHAR).
+        columns:
+          - name: customer_id
+            data_tests: [not_null]
+
+      - name: products_raw
+        identifier: PRODUCTS_RAW
+        description: Daily full snapshot of products (CSV, all VARCHAR).
+        columns:
+          - name: product_id
+            data_tests: [not_null]
+
+      - name: orders_raw
+        identifier: ORDERS_RAW
+        description: Orders as NDJSON in a VARIANT, with nested items[] array.
+        columns:
+          - name: payload
+            data_tests: [not_null]
+
+  - name: audit
+    database: "{{ 'RETAIL_PROD' if target.name == 'prod' else 'RETAIL_DEV' }}"
+    schema: AUDIT
+    tables:
+      - name: load_log
+        identifier: LOAD_LOG

@@ -1,0 +1,5 @@
+customer_id,first_name,last_name,email,phone,city,country,segment,created_at,updated_at
+C001,priya,sharma,Priya.Sharma@example.com,07700 900001,rugby,gb,consumer,2025-03-01 09:00:00,2025-03-01 09:00:00
+C002,tom,baker,tom.baker@example.com,,london,GB,corporate,2025-06-10 12:00:00,2025-06-10 12:00:00
+C003,aisha,khan,aisha.khan@example,07700 900003,leeds,GB,,2026-01-15 08:30:00,2026-01-15 08:30:00
+C002,tom,baker,tom.baker@example.com,,london,GB,corporate,2025-06-10 12:00:00,2025-06-10 12:00:00

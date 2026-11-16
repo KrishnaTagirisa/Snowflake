@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AirflowSensorList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::acme-retail-landing",
+      "Condition": { "StringLike": { "s3:prefix": ["retail/*"] } }
+    },
+    {
+      "Sid": "AirflowSensorHead",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::acme-retail-landing/retail/*/_SUCCESS"
+    },
+    {
+      "Sid": "AirflowSecrets",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:eu-west-2:<AWS_ACCOUNT_ID>:secret:airflow/*"
+    }
+  ]
+}
