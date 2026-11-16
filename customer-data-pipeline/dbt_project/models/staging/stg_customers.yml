@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: Cleaned, de-duplicated, typed customer records -- one row per customer_id.
+    columns:
+      - name: customer_id
+        description: Unique customer identifier.
+        tests:
+          - unique
+          - not_null
+      - name: full_name
+        description: Customer's full name, trimmed.
+      - name: country_code
+        description: ISO-2 country code, standardized via the country_code_mapping seed.
+      - name: date_of_birth
+        description: Customer's date of birth.
+        tests:
+          - not_null

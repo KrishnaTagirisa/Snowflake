@@ -1,0 +1,203 @@
+id,name,country,dob
+1,Aditi Brown,United States,1976-04-09
+2,Linda Davis,United Kingdom,1960-10-16
+3,Wei Lee,Canada,2004-07-28
+4,Susan Johnson,United States,1960-01-02
+5,Michael Davis,Japan,2005-08-09
+6,James Lee,Germany,2000-06-26
+7,Susan Davis,Brazil,2004-06-18
+8,William Smith,Spain,1965-12-02
+9,Hiroshi Thomas,India,1976-07-11
+10,John Miller,Spain,1981-10-17
+11,Patricia Williams,Australia,1960-04-10
+12,Barbara Anderson,China,1975-04-30
+13,Ingrid Johnson,Italy,1992-10-24
+14,Sarah Brown,South Africa,1985-07-22
+15,Robert Lee,France,2007-12-30
+16,Karen Anderson,China,1968-11-05
+17,Hiroshi Williams,United States,1972-01-16
+18,Carlos Martinez,Canada,1972-06-25
+19,Noor Brown,Australia,1976-07-14
+20,Joseph Anderson,United Kingdom,1984-10-22
+21,Barbara Miller,Mexico,1975-07-20
+22,Hiroshi Williams,China,1966-12-13
+23,Sarah Davis,United Kingdom,1993-01-25
+24,Richard Rodriguez,South Africa,2001-07-25
+25,Linda Wilson,Netherlands,1956-08-12
+26,Linda Johnson,Spain,1979-11-24
+27,Richard Rodriguez,Canada,1970-07-11
+28,Charles Wilson,Germany,1996-05-20
+29,Richard Moore,United Kingdom,1975-05-12
+30,John Davis,Italy,2001-12-16
+31,Sarah Rodriguez,Italy,2004-01-16
+32,Susan Perez,Australia,1984-01-27
+33,Linda Jones,Japan,1995-11-15
+34,Robert Johnson,Netherlands,1961-06-07
+35,John Garcia,Spain,1989-06-21
+36,Karen Williams,Australia,1985-10-31
+37,Karen Moore,Japan,1974-02-25
+38,Sarah Smith,Mexico,1961-11-15
+39,Wei Lee,Spain,1975-07-15
+40,Carlos Wilson,Canada,1977-12-05
+41,Susan Garcia,Brazil,1951-11-21
+42,Fatima Rodriguez,Japan,1967-08-17
+43,Thomas Brown,Netherlands,2007-09-11
+44,Elizabeth Martin,China,1969-06-10
+45,John Anderson,Spain,1966-02-02
+46,Sarah Martin,South Africa,1951-08-25
+47,Karen Wilson,Brazil,1953-05-06
+48,Patricia Anderson,South Africa,1979-03-09
+49,Linda Johnson,Germany,2002-07-01
+50,Robert Williams,Italy,1995-03-13
+51,Liam Williams,Spain,1999-05-22
+52,Carlos Jones,United Kingdom,1994-03-28
+53,Sarah Garcia,France,1998-12-08
+54,Noor Thompson,Australia,1970-08-07
+55,Sarah Miller,Italy,1979-07-25
+56,Richard Anderson,Brazil,1998-01-11
+57,Joseph Brown,Germany,1971-10-03
+58,Robert Wilson,United States,2004-05-17
+59,Sarah Davis,China,1971-05-10
+60,James Williams,Italy,2008-03-19
+61,Mary Davis,Canada,1954-06-01
+62,Noor Wilson,Canada,1997-09-21
+63,Linda Rodriguez,Mexico,1995-02-23
+64,Michael Lee,United Kingdom,2002-10-29
+65,Charles Jackson,Germany,1994-01-11
+66,Ingrid Thomas,Germany,1960-01-22
+67,Patricia Thomas,India,1989-08-06
+68,Susan Moore,Netherlands,1956-06-16
+69,Wei Brown,United States,1987-09-20
+70,Fatima Wilson,Spain,1961-05-26
+71,Linda Miller,Germany,1999-09-17
+72,Joseph Jones,Australia,1968-01-22
+73,William Moore,Germany,1958-05-12
+74,Joseph Lee,Canada,1956-02-19
+75,Aditi Lee,Netherlands,1952-12-02
+76,Robert Davis,United Kingdom,1988-01-22
+77,Jessica Jackson,Germany,1987-07-30
+78,Mary Garcia,Australia,1951-10-16
+79,Richard Rodriguez,South Africa,1992-06-01
+80,Elizabeth Thomas,Italy,2001-06-16
+81,Wei Jackson,United Kingdom,1968-08-19
+82,Elizabeth Miller,United States,2003-07-23
+83,Fatima Lee,United States,1979-09-25
+84,Mary Johnson,China,1994-05-16
+85,Thomas Martin,United Kingdom,1956-09-12
+86,Thomas Williams,Netherlands,1968-04-08
+87,Robert Thompson,Canada,1972-09-12
+88,Richard Brown,South Africa,2002-09-15
+89,Linda Perez,China,1955-03-01
+90,Karen Williams,Australia,2003-12-17
+91,Charles Martin,India,1974-12-28
+92,Michael Wilson,Germany,1975-06-05
+93,Richard Jones,Mexico,1978-07-06
+94,Joseph Wilson,South Africa,1958-02-08
+95,James Moore,China,2002-02-08
+96,Patricia Williams,Japan,1970-09-20
+97,Thomas Rodriguez,United Kingdom,1982-11-28
+98,Robert Davis,India,1977-03-01
+99,Jennifer Moore,Netherlands,2000-05-01
+100,Hiroshi Martinez,China,1999-01-19
+101,James Lee,France,1960-11-21
+102,John Rodriguez,Canada,1961-03-14
+103,Fatima Lee,United Kingdom,1976-01-12
+104,Elizabeth Thompson,Germany,1982-05-11
+105,Michael Rodriguez,Japan,1995-06-05
+106,William Johnson,Canada,2008-07-02
+107,Susan Rodriguez,United States,1951-12-01
+108,David Jones,Mexico,1975-02-05
+109,Jennifer Moore,Japan,1989-12-19
+110,Sarah Smith,Canada,1958-05-07
+111,Hiroshi Jones,Japan,1954-10-30
+112,Liam Anderson,China,2001-03-02
+113,John Thomas,United Kingdom,1955-05-08
+114,Elizabeth Anderson,South Africa,1955-03-06
+115,Barbara Miller,Mexico,1973-12-25
+116,Wei Brown,India,2001-10-29
+117,Noor Thomas,China,1965-06-18
+118,Linda Garcia,Spain,1967-06-25
+119,Susan Smith,United Kingdom,1981-05-26
+120,Ingrid Thomas,Spain,1973-11-10
+121,William Garcia,Spain,1961-04-18
+122,Richard Johnson,Netherlands,1993-10-28
+123,Linda Miller,Netherlands,1992-11-22
+124,Barbara Martinez,Netherlands,1972-01-06
+125,Linda Smith,Mexico,1968-12-03
+126,Richard Wilson,France,1957-10-28
+127,Carlos Rodriguez,India,1997-04-19
+128,Richard Lee,India,1954-01-27
+129,Patricia Rodriguez,United Kingdom,2003-09-07
+130,William Johnson,Canada,2005-02-12
+131,Susan Anderson,Italy,1979-09-27
+132,Susan Thompson,Japan,1961-12-21
+133,Richard Perez,Germany,1974-06-13
+134,Mary Thomas,United States,1998-03-29
+135,Ingrid Lee,Mexico,1969-04-10
+136,Barbara Thomas,Canada,1981-03-21
+137,Karen Wilson,Mexico,1962-10-11
+138,Fatima Martinez,Japan,1979-05-06
+139,Wei Thomas,India,1987-09-12
+140,Hiroshi Martinez,Japan,1963-01-06
+141,Michael Thomas,Mexico,1985-08-11
+142,Wei Garcia,China,2002-08-27
+143,Elizabeth Taylor,Japan,1951-08-20
+144,Elizabeth Martinez,Germany,1990-03-01
+145,Ingrid Perez,China,1980-07-04
+146,Joseph Moore,Brazil,1970-10-08
+147,Thomas Jackson,Spain,1966-10-27
+148,Wei Williams,France,1997-11-03
+149,Wei Thompson,India,1959-12-23
+150,Liam Davis,Mexico,1979-06-12
+151,Linda Miller,United Kingdom,1953-10-15
+152,Mary Davis,Brazil,2006-06-09
+153,Noor Williams,Brazil,1988-10-11
+154,Aditi Perez,Germany,1986-01-17
+155,Jessica Taylor,Germany,1964-11-01
+156,Aditi Smith,South Africa,1961-02-27
+157,Carlos Thomas,Germany,1967-05-18
+158,Ingrid Martin,Brazil,1956-02-07
+159,Sarah Davis,South Africa,1962-06-26
+160,Joseph Jones,Spain,1993-04-13
+161,Wei Martin,Japan,2005-01-06
+162,David Moore,China,1996-11-18
+163,Susan Lee,Brazil,1965-11-16
+164,Fatima Jackson,Brazil,1974-11-07
+165,Carlos Davis,Netherlands,1976-06-22
+166,Carlos Martin,Brazil,2007-10-29
+167,Linda Rodriguez,Brazil,1958-07-19
+168,Hiroshi Martinez,Germany,1975-12-22
+169,David Wilson,South Africa,2000-01-21
+170,Robert Jones,United Kingdom,1972-05-05
+171,Richard Jones,Italy,1970-10-16
+172,Robert Thomas,Australia,1981-04-13
+173,Sarah Moore,Australia,1957-03-08
+174,Michael Thomas,Australia,2003-12-31
+175,Hiroshi Smith,Netherlands,2003-03-31
+176,Richard Jackson,United States,1983-02-26
+177,Elizabeth Taylor,Netherlands,1989-03-10
+178,Sarah Lee,Spain,2005-09-19
+179,Linda Jackson,Germany,1976-01-31
+180,Susan Jackson,United States,1986-06-26
+181,David Taylor,Italy,1966-05-28
+182,Liam Moore,South Africa,1963-01-18
+183,Karen Lee,United States,1986-12-12
+184,Charles Perez,Mexico,1954-01-11
+185,Robert Thomas,United Kingdom,1993-01-06
+186,Jennifer Johnson,France,1985-08-10
+187,David Miller,Brazil,1980-12-02
+188,David Taylor,France,1989-06-01
+189,William Williams,Brazil,1953-05-03
+190,Fatima Lee,United States,1982-12-29
+191,Linda Williams,Spain,1955-03-18
+192,Carlos Smith,Germany,1969-06-25
+193,Liam Smith,China,1965-04-08
+194,Linda Jones,Brazil,1961-11-10
+195,Charles Miller,Brazil,1974-08-02
+196,Carlos Anderson,United Kingdom,2005-12-14
+197,Karen Brown,Spain,1966-04-16
+198,Elizabeth Brown,China,1953-11-25
+199,Elizabeth Perez,Mexico,1985-04-08
+200,Richard Miller,Canada,2004-09-18
+201,  Extra  Spaces  ,usa,1990-01-15
+202,Duplicate Country Case,GERMANY,1985-06-30

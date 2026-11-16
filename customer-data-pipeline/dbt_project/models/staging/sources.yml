@@ -1,0 +1,34 @@
+# =============================================================================
+# sources.yml
+# Declares the RAW table that Airflow's COPY INTO loads into as a dbt
+# source, so staging models reference it via source() (trackable lineage,
+# freshness checks) instead of hardcoded table names.
+# =============================================================================
+version: 2
+
+sources:
+  - name: raw
+    database: "{{ var('raw_database') }}"
+    schema: RAW
+    tables:
+      - name: customers_raw
+        description: >
+          Raw customer records landed from S3 by the Airflow COPY INTO task.
+          Minimally typed -- all columns land as text plus load metadata.
+        loaded_at_field: _loaded_at
+        freshness:
+          warn_after: {count: 30, period: hour}
+          error_after: {count: 72, period: hour}
+        columns:
+          - name: customer_id
+            description: Source system's customer identifier (text at this layer).
+            tests:
+              - not_null
+          - name: name
+            description: Customer full name, as provided by the source system.
+          - name: country
+            description: Free-text country name from the source system (inconsistent casing expected).
+          - name: dob
+            description: Date of birth as text (e.g. "1990-01-15"); cast to DATE in staging.
+          - name: _loaded_at
+            description: Timestamp Snowflake ingested the row (COPY INTO time).

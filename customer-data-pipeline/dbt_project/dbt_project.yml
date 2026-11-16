@@ -1,0 +1,42 @@
+# =============================================================================
+# dbt_project.yml
+# Core dbt project configuration. Model materializations are set per-folder
+# below: staging views are cheap/always-fresh, marts are tables for fast BI
+# query performance.
+# =============================================================================
+name: 'customer_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'customer_analytics'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # Referenced by models/staging/sources.yml so the source database name
+  # can be overridden per environment without editing YAML.
+  raw_database: "{{ env_var('SNOWFLAKE_DATABASE', 'ANALYTICS') }}"
+
+models:
+  customer_analytics:
+    +materialized: view
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts
+      +tags: ['marts']
+
+seeds:
+  customer_analytics:
+    +schema: seeds

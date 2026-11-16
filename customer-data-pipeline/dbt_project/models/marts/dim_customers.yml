@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: dim_customers
+    description: Customer dimension with derived age attributes -- the primary table analysts/BI tools should query.
+    columns:
+      - name: customer_sk
+        description: Stable surrogate key (hash of customer_id) -- use this to join, not customer_id, so upstream ID changes don't break joins.
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: Natural key from the source system.
+        tests:
+          - unique
+          - not_null
+      - name: age
+        description: Age in years, computed as of the current date.
+      - name: is_adult
+        description: Boolean flag, true when age >= 18.
